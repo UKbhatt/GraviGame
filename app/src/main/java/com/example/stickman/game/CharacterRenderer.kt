@@ -10,7 +10,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
 import androidx.compose.ui.graphics.drawscope.rotate
+import kotlin.math.PI
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 private const val BODY_WIDTH = 150f
 private const val BODY_HEIGHT = 165f
@@ -28,6 +31,9 @@ private const val EYE_HALF_WIDTH = 15f
 private const val EYE_HALF_HEIGHT = 24f
 private const val EYE_SLANT = 22f
 private const val GAZE_SHIFT = 8f
+
+private const val STAR_POINTS = 5
+private const val STAR_INNER_RADIUS_RATIO = 0.45f
 
 private const val TERRAIN_WIDTH = Physics.OBSTACLE_HALF_WIDTH * 2f
 
@@ -50,6 +56,19 @@ internal fun DrawScope.drawPolyline(points: List<Vec2>) {
         color = GamePalette.Terrain,
         style = StrokeStyle(width = TERRAIN_WIDTH, cap = StrokeCap.Round, join = StrokeJoin.Round),
     )
+}
+
+internal fun DrawScope.drawStar(center: Vec2) {
+    val outline = Path()
+    repeat(STAR_POINTS * 2) { i ->
+        val radius = if (i % 2 == 0) StarRules.STAR_RADIUS else StarRules.STAR_RADIUS * STAR_INNER_RADIUS_RATIO
+        val angle = -PI / 2 + i * PI / STAR_POINTS
+        val x = center.x + radius * cos(angle).toFloat()
+        val y = center.y + radius * sin(angle).toFloat()
+        if (i == 0) outline.moveTo(x, y) else outline.lineTo(x, y)
+    }
+    outline.close()
+    drawPath(outline, GamePalette.Star)
 }
 
 /**

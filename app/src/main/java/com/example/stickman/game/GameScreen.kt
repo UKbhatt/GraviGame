@@ -24,24 +24,33 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.random.Random
 
 sealed interface Mode {
     data object Play : Mode
     data class Build(val currentStroke: List<Vec2> = emptyList()) : Mode
+    data class Hunt(val hunt: StarHunt) : Mode
 }
 
 @Composable
-fun GameScreen(modifier: Modifier = Modifier) {
+fun GameScreen(gameMode: GameMode, modifier: Modifier = Modifier) {
     val gravity by rememberDeviceGravity()
 
     BoxWithConstraintsFullScreen(modifier) { world ->
-        var mode by remember(world) { mutableStateOf<Mode>(Mode.Play) }
+        var mode by remember(world) { mutableStateOf(gameMode.initialMode(world)) }
         var strokes by remember(world) { mutableStateOf(emptyList<Stroke>()) }
         var state by remember(world) { mutableStateOf(GameState.spawn(world)) }
 
         LaunchedEffect(world) {
             forEachFrame { dt ->
-                if (mode is Mode.Play) state = state.tick(gravity, world, strokes, dt)
+                when (val current = mode) {
+                    Mode.Play -> state = state.tick(gravity, world, strokes, dt)
+                    is Mode.Hunt -> {
+                        state = state.tick(gravity, world, strokes, dt)
+                        mode = Mode.Hunt(current.hunt.collectIfReached(state.position, world, Random))
+                    }
+                    is Mode.Build -> Unit
+                }
             }
         }
 
@@ -63,18 +72,25 @@ fun GameScreen(modifier: Modifier = Modifier) {
             when (currentMode) {
                 is Mode.Build -> drawPolyline(currentMode.currentStroke)
                 Mode.Play -> drawCharacter(state, gravity)
+                is Mode.Hunt -> {
+                    drawStar(currentMode.hunt.star)
+                    drawCharacter(state, gravity)
+                }
             }
         }
 
-        ControlButton(
-            label = if (mode is Mode.Play) "✏ Build" else "▶ Play",
-            modifier = Modifier.align(Alignment.TopEnd).padding(20.dp),
-        ) {
-            if (mode is Mode.Play) {
-                mode = Mode.Build()
-            } else {
-                state = GameState.spawnFree(world, strokes, state.position)
-                mode = Mode.Play
+        when (currentMode) {
+            is Mode.Hunt -> StarCount(currentMode.hunt.collected)
+            else -> ControlButton(
+                label = if (mode is Mode.Play) "✏ Build" else "▶ Play",
+                modifier = Modifier.align(Alignment.TopEnd).padding(20.dp),
+            ) {
+                if (mode is Mode.Play) {
+                    mode = Mode.Build()
+                } else {
+                    state = GameState.spawnFree(world, strokes, state.position)
+                    mode = Mode.Play
+                }
             }
         }
 
@@ -86,6 +102,22 @@ fun GameScreen(modifier: Modifier = Modifier) {
             )
         }
     }
+}
+
+private fun GameMode.initialMode(world: World): Mode = when (this) {
+    GameMode.FreePlay -> Mode.Play
+    GameMode.StarHunt -> Mode.Hunt(StarHunt.begin(world, GameState.spawn(world).position, Random))
+}
+
+@Composable
+private fun BoxScope.StarCount(collected: Int) {
+    Text(
+        text = "★ $collected",
+        color = GamePalette.Ink,
+        fontSize = 24.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.align(Alignment.TopEnd).padding(horizontal = 24.dp, vertical = 28.dp),
+    )
 }
 
 @Composable
@@ -121,7 +153,7 @@ private fun BoxWithConstraintsFullScreen(
 }
 
 @Composable
-private fun ControlButton(
+internal fun ControlButton(
     label: String,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,

@@ -4,9 +4,14 @@ A small Jetpack Compose sandbox game. A chunky black blob falls in whichever dir
 gravity sensor says is "down". Switch to build mode, draw terrain with your finger, switch back,
 and watch the blob land on, slide along, and bounce off what you drew.
 
-- **Play mode**: tilt the device to roll the blob around. It bounces off the screen edges and any drawn strokes.
-- **Build mode**: drag to draw strokes. Undo removes the last stroke, Clear removes them all.
-- Leaving build mode re-spawns the blob on the nearest clear spot so it never starts inside terrain.
+The launch menu offers two games:
+
+- **Free Play**
+  - **Play mode**: tilt the device to roll the blob around. It bounces off the screen edges and any drawn strokes.
+  - **Build mode**: drag to draw strokes. Undo removes the last stroke, Clear removes them all.
+  - Leaving build mode re-spawns the blob on the nearest clear spot so it never starts inside terrain.
+- **Star Hunt**: a star appears at a random spot. Roll the blob into it to score; the next star appears
+  immediately. There is no build mode here, and Back returns to the menu.
 
 ## Getting started
 
@@ -34,11 +39,13 @@ StickMan/
     ├── build.gradle.kts            Android config: namespace, SDK levels, Compose
     └── src/
         ├── main/java/com/example/stickman/
-        │   ├── MainActivity.kt     entry point: edge-to-edge, theme, GameScreen
+        │   ├── MainActivity.kt     entry point: edge-to-edge, theme, menu ⇄ game switch
+        │   ├── MenuScreen.kt       the launch menu: Free Play or Star Hunt
         │   ├── game/               the feature (see below)
         │   └── ui/theme/           Material 3 theme scaffolding
         ├── test/java/com/example/stickman/game/
-        │   └── GamePhysicsTest.kt  JVM tests for the domain
+        │   ├── GamePhysicsTest.kt  JVM tests for the physics domain
+        │   └── StarHuntTest.kt     JVM tests for the star rule
         └── androidTest/            instrumented test stub
 ```
 
@@ -50,6 +57,8 @@ files inside it are split by *reason to change*:
 | File | Responsibility | Depends on Android or Compose? |
 |---|---|---|
 | `GamePhysics.kt` | Domain model and the frame step: `Vec2`, `Stroke`, `World`, `GameState`, `tick()` | No |
+| `StarHunt.kt` | Star Hunt rule: where the star is, how many were caught, `collectIfReached()` | No |
+| `GameMode.kt` | The two games the menu can start: `FreePlay`, `StarHunt` | No |
 | `GameScreen.kt` | Holds screen state, wires the pieces together, renders the HUD buttons | Yes |
 | `GameLoop.kt` | Calls a callback once per display frame with the elapsed seconds | Yes |
 | `DeviceGravity.kt` | Reads the gravity sensor into a Compose `State<Vec2>` | Yes |
@@ -98,12 +107,13 @@ drag gestures ──▶ Mode.Build(currentStroke) ──▶ strokes ───┘
 
 Screen state is three `remember`ed values, all keyed on the `World` so a resize resets them together:
 
-- `mode`: a sealed type, either `Mode.Play` or `Mode.Build(currentStroke)`. A half-drawn stroke can
-  only exist while building, so that illegal combination is unrepresentable.
+- `mode`: a sealed type, one of `Mode.Play`, `Mode.Build(currentStroke)` or `Mode.Hunt(starHunt)`. A
+  half-drawn stroke can only exist while building and a star only while hunting, so those illegal
+  combinations are unrepresentable.
 - `strokes`: the committed terrain, an immutable list that is replaced rather than mutated.
 - `state`: the blob's `GameState`.
 
-The frame loop only calls `tick` while in play mode. The canvas redraws from the current values each
+The frame loop only calls `tick` while in play or hunt mode. The canvas redraws from the current values each
 frame. Buttons and gestures replace state; nothing mutates in place.
 
 ### Why this shape

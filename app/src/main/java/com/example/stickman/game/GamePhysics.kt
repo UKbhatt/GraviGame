@@ -199,7 +199,7 @@ internal fun closestPointOnSegment(point: Vec2, a: Vec2, b: Vec2): Vec2 {
     return Vec2(a.x + abx * t, a.y + aby * t)
 }
 
-private fun squaredDistance(a: Vec2, b: Vec2): Float {
+internal fun squaredDistance(a: Vec2, b: Vec2): Float {
     val dx = a.x - b.x
     val dy = a.y - b.y
     return dx * dx + dy * dy
