@@ -15,7 +15,11 @@ import kotlin.math.sqrt
 data class Vec2(val x: Float, val y: Float)
 
 /** One hand-drawn line: a polyline. Each consecutive pair of points is a collidable segment. */
-data class Stroke(val points: List<Vec2>)
+data class Stroke(val points: List<Vec2>) {
+    inline fun forEachSegment(action: (start: Vec2, end: Vec2) -> Unit) {
+        for (i in 0 until points.size - 1) action(points[i], points[i + 1])
+    }
+}
 
 /** Tunable feel of the game. Distances in pixels, time in seconds. */
 object Physics {
@@ -25,10 +29,25 @@ object Physics {
     const val WALL_RESTITUTION = 0.2f    // bounciness of walls and drawn terrain (0 = dead stop)
     const val CONTACT_FRICTION = 0.85f   // sliding damping applied on any contact
     const val FACING_THRESHOLD = 5f      // horizontal speed before the eyes change direction
+    const val CONTACT_DISTANCE = HALF_EXTENT + OBSTACLE_HALF_WIDTH
+    const val TERRAIN_SETTLE_PASSES = 2  // settles corners where several segments meet
+    const val SPAWN_SEARCH_STEP = 60f
 }
 
-/** The playfield — the whole screen. */
-data class World(val width: Float, val height: Float)
+private const val CENTRED_ON_LINE_EPSILON = 1e-3f
+private const val DEGENERATE_SEGMENT_EPSILON = 1e-6f
+
+/** The playfield — the whole screen. The min/max values bound the blob's centre. */
+data class World(val width: Float, val height: Float) {
+    val minX: Float get() = Physics.HALF_EXTENT
+    val maxX: Float get() = width - Physics.HALF_EXTENT
+    val minY: Float get() = Physics.HALF_EXTENT
+    val maxY: Float get() = height - Physics.HALF_EXTENT
+
+    fun contains(pos: Vec2): Boolean = pos.x in minX..maxX && pos.y in minY..maxY
+
+    fun clamp(pos: Vec2): Vec2 = Vec2(pos.x.coerceIn(minX, maxX), pos.y.coerceIn(minY, maxY))
+}
 
 /** The complete, immutable game state. [cx]/[cy] is the centre of the blob. */
 data class GameState(
@@ -38,41 +57,26 @@ data class GameState(
     val velocityY: Float,
     val facingRight: Boolean,
 ) {
-    companion object {
-        fun spawn(world: World): GameState = at(world.width / 2f, world.height / 2f)
+    val position: Vec2 get() = Vec2(cx, cy)
 
-        private fun at(x: Float, y: Float) =
-            GameState(cx = x, cy = y, velocityX = 0f, velocityY = 0f, facingRight = true)
+    companion object {
+        fun spawn(world: World): GameState = at(Vec2(world.width / 2f, world.height / 2f))
+
+        private fun at(pos: Vec2) =
+            GameState(cx = pos.x, cy = pos.y, velocityX = 0f, velocityY = 0f, facingRight = true)
 
         /**
          * Summons the blob to a spot that clears all terrain: the [preferred] position if
          * it's free, otherwise the nearest free grid cell, otherwise the top-centre.
          */
         fun spawnFree(world: World, obstacles: List<Stroke>, preferred: Vec2): GameState {
-            val start = clampToBounds(preferred, world)
-            if (isFree(start, world, obstacles)) return at(start.x, start.y)
+            val start = world.clamp(preferred)
+            if (isFree(start, world, obstacles)) return at(start)
 
-            var best: Vec2? = null
-            var bestDistance = Float.MAX_VALUE
-            val step = 60f
-            var gx = Physics.HALF_EXTENT
-            while (gx <= world.width - Physics.HALF_EXTENT) {
-                var gy = Physics.HALF_EXTENT
-                while (gy <= world.height - Physics.HALF_EXTENT) {
-                    val candidate = Vec2(gx, gy)
-                    if (isFree(candidate, world, obstacles)) {
-                        val d = squaredDistance(candidate, start)
-                        if (d < bestDistance) {
-                            bestDistance = d
-                            best = candidate
-                        }
-                    }
-                    gy += step
-                }
-                gx += step
-            }
-            val chosen = best ?: Vec2(world.width / 2f, Physics.HALF_EXTENT)
-            return at(chosen.x, chosen.y)
+            val nearestFree = gridPoints(world, Physics.SPAWN_SEARCH_STEP)
+                .filter { isFree(it, world, obstacles) }
+                .minByOrNull { squaredDistance(it, start) }
+            return at(nearestFree ?: Vec2(world.width / 2f, world.minY))
         }
     }
 }
@@ -81,94 +85,121 @@ data class GameState(
  * Advances the world by [dt] seconds under [gravity] (screen axes, sensor units),
  * resolving against the walls and every drawn [obstacles] stroke.
  */
-fun GameState.tick(gravity: Vec2, world: World, obstacles: List<Stroke>, dt: Float): GameState {
-    var vx = velocityX + gravity.x * Physics.GRAVITY_SCALE * dt
-    var vy = velocityY + gravity.y * Physics.GRAVITY_SCALE * dt
-    var x = cx + vx * dt
-    var y = cy + vy * dt
+fun GameState.tick(gravity: Vec2, world: World, obstacles: List<Stroke>, dt: Float): GameState =
+    integrate(gravity, dt)
+        .resolveWalls(world)
+        .resolveTerrain(obstacles)
+        .clampInside(world)
+        .withFacing()
 
-    // Screen-edge walls.
-    val minX = Physics.HALF_EXTENT
-    val maxX = world.width - Physics.HALF_EXTENT
-    val minY = Physics.HALF_EXTENT
-    val maxY = world.height - Physics.HALF_EXTENT
-    if (x < minX) { x = minX; vx = -vx * Physics.WALL_RESTITUTION; vy *= Physics.CONTACT_FRICTION }
-    else if (x > maxX) { x = maxX; vx = -vx * Physics.WALL_RESTITUTION; vy *= Physics.CONTACT_FRICTION }
-    if (y < minY) { y = minY; vy = -vy * Physics.WALL_RESTITUTION; vx *= Physics.CONTACT_FRICTION }
-    else if (y > maxY) { y = maxY; vy = -vy * Physics.WALL_RESTITUTION; vx *= Physics.CONTACT_FRICTION }
+private fun GameState.integrate(gravity: Vec2, dt: Float): GameState {
+    val vx = velocityX + gravity.x * Physics.GRAVITY_SCALE * dt
+    val vy = velocityY + gravity.y * Physics.GRAVITY_SCALE * dt
+    return copy(cx = cx + vx * dt, cy = cy + vy * dt, velocityX = vx, velocityY = vy)
+}
 
-    // Drawn terrain. Two passes settle corners where several segments meet.
-    val minDistance = Physics.HALF_EXTENT + Physics.OBSTACLE_HALF_WIDTH
-    repeat(2) {
+private fun GameState.resolveWalls(world: World): GameState {
+    val afterSides = when {
+        cx < world.minX -> bounceOffVerticalWall(world.minX)
+        cx > world.maxX -> bounceOffVerticalWall(world.maxX)
+        else -> this
+    }
+    return when {
+        afterSides.cy < world.minY -> afterSides.bounceOffHorizontalWall(world.minY)
+        afterSides.cy > world.maxY -> afterSides.bounceOffHorizontalWall(world.maxY)
+        else -> afterSides
+    }
+}
+
+private fun GameState.bounceOffVerticalWall(wallX: Float): GameState = copy(
+    cx = wallX,
+    velocityX = -velocityX * Physics.WALL_RESTITUTION,
+    velocityY = velocityY * Physics.CONTACT_FRICTION,
+)
+
+private fun GameState.bounceOffHorizontalWall(wallY: Float): GameState = copy(
+    cy = wallY,
+    velocityY = -velocityY * Physics.WALL_RESTITUTION,
+    velocityX = velocityX * Physics.CONTACT_FRICTION,
+)
+
+private fun GameState.resolveTerrain(obstacles: List<Stroke>): GameState {
+    var resolved = this
+    repeat(Physics.TERRAIN_SETTLE_PASSES) {
         for (stroke in obstacles) {
-            val points = stroke.points
-            for (i in 0 until points.size - 1) {
-                val closest = closestPointOnSegment(x, y, points[i], points[i + 1])
-                var dx = x - closest.x
-                var dy = y - closest.y
-                var distance = sqrt(dx * dx + dy * dy)
-                if (distance >= minDistance) continue
-
-                if (distance < 1e-3f) { dx = 0f; dy = -1f; distance = 1f } // centre on the line
-                val nx = dx / distance
-                val ny = dy / distance
-                x = closest.x + nx * minDistance
-                y = closest.y + ny * minDistance
-
-                val normalSpeed = vx * nx + vy * ny
-                if (normalSpeed < 0f) {
-                    vx -= (1f + Physics.WALL_RESTITUTION) * normalSpeed * nx
-                    vy -= (1f + Physics.WALL_RESTITUTION) * normalSpeed * ny
-                    vx *= Physics.CONTACT_FRICTION
-                    vy *= Physics.CONTACT_FRICTION
-                }
-            }
+            stroke.forEachSegment { start, end -> resolved = resolved.pushOutOf(start, end) }
         }
     }
-
-    // Terrain push-out can nudge past a wall; clamp position back inside without touching velocity.
-    x = x.coerceIn(minX, maxX)
-    y = y.coerceIn(minY, maxY)
-
-    val facing = when {
-        vx < -Physics.FACING_THRESHOLD -> false
-        vx > Physics.FACING_THRESHOLD -> true
-        else -> facingRight
-    }
-
-    return copy(cx = x, cy = y, velocityX = vx, velocityY = vy, facingRight = facing)
+    return resolved
 }
+
+private fun GameState.pushOutOf(segmentStart: Vec2, segmentEnd: Vec2): GameState {
+    val closest = closestPointOnSegment(position, segmentStart, segmentEnd)
+    val dx = cx - closest.x
+    val dy = cy - closest.y
+    val distance = sqrt(dx * dx + dy * dy)
+    if (distance >= Physics.CONTACT_DISTANCE) return this
+
+    val normal = if (distance < CENTRED_ON_LINE_EPSILON) Vec2(0f, -1f) else Vec2(dx / distance, dy / distance)
+    val pushedX = closest.x + normal.x * Physics.CONTACT_DISTANCE
+    val pushedY = closest.y + normal.y * Physics.CONTACT_DISTANCE
+
+    val normalSpeed = velocityX * normal.x + velocityY * normal.y
+    if (normalSpeed >= 0f) return copy(cx = pushedX, cy = pushedY)
+
+    val impulse = (1f + Physics.WALL_RESTITUTION) * normalSpeed
+    return copy(
+        cx = pushedX,
+        cy = pushedY,
+        velocityX = (velocityX - impulse * normal.x) * Physics.CONTACT_FRICTION,
+        velocityY = (velocityY - impulse * normal.y) * Physics.CONTACT_FRICTION,
+    )
+}
+
+/** Terrain push-out can nudge past a wall; clamp position back inside without touching velocity. */
+private fun GameState.clampInside(world: World): GameState {
+    val inside = world.clamp(position)
+    return copy(cx = inside.x, cy = inside.y)
+}
+
+private fun GameState.withFacing(): GameState = copy(
+    facingRight = when {
+        velocityX < -Physics.FACING_THRESHOLD -> false
+        velocityX > Physics.FACING_THRESHOLD -> true
+        else -> facingRight
+    },
+)
 
 /** True when a blob centred at [pos] overlaps no wall and no drawn stroke. */
-private fun isFree(pos: Vec2, world: World, obstacles: List<Stroke>): Boolean {
-    if (pos.x < Physics.HALF_EXTENT || pos.x > world.width - Physics.HALF_EXTENT) return false
-    if (pos.y < Physics.HALF_EXTENT || pos.y > world.height - Physics.HALF_EXTENT) return false
-    val minDistance = Physics.HALF_EXTENT + Physics.OBSTACLE_HALF_WIDTH
-    for (stroke in obstacles) {
-        val points = stroke.points
-        for (i in 0 until points.size - 1) {
-            val closest = closestPointOnSegment(pos.x, pos.y, points[i], points[i + 1])
-            if (squaredDistance(pos, closest) < minDistance * minDistance) return false
-        }
+private fun isFree(pos: Vec2, world: World, obstacles: List<Stroke>): Boolean =
+    world.contains(pos) && obstacles.none { it.touches(pos) }
+
+private fun Stroke.touches(pos: Vec2): Boolean {
+    val contactDistanceSquared = Physics.CONTACT_DISTANCE * Physics.CONTACT_DISTANCE
+    forEachSegment { start, end ->
+        if (squaredDistance(pos, closestPointOnSegment(pos, start, end)) < contactDistanceSquared) return true
     }
-    return true
+    return false
 }
 
-private fun closestPointOnSegment(px: Float, py: Float, a: Vec2, b: Vec2): Vec2 {
+private fun gridPoints(world: World, step: Float): Sequence<Vec2> =
+    axisSteps(world.minX, world.maxX, step).flatMap { x ->
+        axisSteps(world.minY, world.maxY, step).map { y -> Vec2(x, y) }
+    }
+
+private fun axisSteps(from: Float, to: Float, step: Float): Sequence<Float> =
+    generateSequence(from) { it + step }.takeWhile { it <= to }
+
+internal fun closestPointOnSegment(point: Vec2, a: Vec2, b: Vec2): Vec2 {
     val abx = b.x - a.x
     val aby = b.y - a.y
     val lengthSquared = abx * abx + aby * aby
-    if (lengthSquared < 1e-6f) return a
-    val t = (((px - a.x) * abx + (py - a.y) * aby) / lengthSquared).coerceIn(0f, 1f)
+    if (lengthSquared < DEGENERATE_SEGMENT_EPSILON) return a
+    val t = (((point.x - a.x) * abx + (point.y - a.y) * aby) / lengthSquared).coerceIn(0f, 1f)
     return Vec2(a.x + abx * t, a.y + aby * t)
 }
 
-private fun clampToBounds(pos: Vec2, world: World): Vec2 = Vec2(
-    pos.x.coerceIn(Physics.HALF_EXTENT, world.width - Physics.HALF_EXTENT),
-    pos.y.coerceIn(Physics.HALF_EXTENT, world.height - Physics.HALF_EXTENT),
-)
-
-private fun squaredDistance(a: Vec2, b: Vec2): Float {
+internal fun squaredDistance(a: Vec2, b: Vec2): Float {
     val dx = a.x - b.x
     val dy = a.y - b.y
     return dx * dx + dy * dy
