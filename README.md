@@ -1,4 +1,4 @@
-# StickMan
+# Grumpy
 
 A small Jetpack Compose sandbox game. A chunky black blob falls in whichever direction the phone's
 gravity sensor says is "down". Switch to build mode, draw terrain with your finger, switch back,
